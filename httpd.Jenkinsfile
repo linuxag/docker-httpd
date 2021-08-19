@@ -11,6 +11,8 @@ pipeline{
     stage("httpd build"){
      steps{
       sh '''
+      docker ps -a
+      docker rm -f newhttpd | exit 0
       docker run -d -p 8190:80 --name newhttpd1 newhttpd
       '''
       }
