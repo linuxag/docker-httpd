@@ -8,7 +8,7 @@ pipeline{
       '''
       }
     }
-    stage("httpd build"){
+    stage("run"){
      steps{
       sh '''
       docker ps -a
