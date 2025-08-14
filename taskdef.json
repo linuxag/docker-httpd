@@ -1,5 +1,5 @@
 {
-  "family": "github-app",
+  "family": "my-task",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "512",
