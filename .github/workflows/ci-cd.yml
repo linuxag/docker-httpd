@@ -1,4 +1,5 @@
-name: CI/CD → ECR + ECS (amd64)
+# .github/workflows/ci-cd.yml
+name: CI/CD → ECR + ECS (keys)
 
 on:
   push:
@@ -6,28 +7,28 @@ on:
   workflow_dispatch:
 
 permissions:
-  id-token: write
-  contents: read
+  contents: read   
+
+env:
+  AWS_REGION: ap-south-1
+  AWS_ACCOUNT_ID: 668191888953
+  ECR_REPO: github
+  ECS_CLUSTER: my-cluster
+  ECS_SERVICE: my-service
+  CONTAINER_NAME: web
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    env:
-      AWS_REGION: ${{ vars.AWS_REGION }}           
-      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}  
-      ECR_REPO: ${{ vars.ECR_REPO }}               
-      ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}         
-      ECS_SERVICE: ${{ vars.ECS_SERVICE }}        
-      CONTAINER_NAME: ${{ vars.CONTAINER_NAME }}   
-      OIDC_ROLE_ARN: ${{ vars.OIDC_ROLE_ARN }}     
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS (OIDC)
+      - name: Configure AWS (access keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to ECR
@@ -54,7 +55,6 @@ jobs:
           jq --arg IMG "${IMAGE_URI}" --arg NAME "${CONTAINER_NAME}" \
              '(.containerDefinitions[] | select(.name==$NAME) | .image)=$IMG' \
              taskdef.json > taskdef.rendered.json
-          cat taskdef.rendered.json
 
       - name: Register task definition
         run: |
