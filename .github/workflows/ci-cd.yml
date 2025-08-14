@@ -36,7 +36,7 @@ jobs:
       - name: Build & push image (amd64)
         run: |
           REPO_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
-          docker build -t "${REPO_URI}:${GITHUB_SHA}" -t "${REPO_URI}:latest" -f httpd.Dockerfile .
+          docker build -t "${REPO_URI}:${GITHUB_SHA}" -t "${REPO_URI}:latest" -f Dockerfile .
           docker push "${REPO_URI}:${GITHUB_SHA}"
           docker push "${REPO_URI}:latest"
           echo "REPO_URI=${REPO_URI}" >> $GITHUB_ENV
