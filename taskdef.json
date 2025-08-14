@@ -1,26 +1,152 @@
-{
-  "family": "github-app",
-  "networkMode": "awsvpc",
-  "requiresCompatibilities": ["FARGATE"],
-  "cpu": "512",
-  "memory": "1024",
-  "runtimePlatform": { "cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX" },
-  "executionRoleArn": "arn:aws:iam::668191888953:role/ecsTaskExecutionRole",
-  "taskRoleArn": "arn:aws:iam::668191888953:role/ecsTaskRole",
-  "containerDefinitions": [
-    {
-      "name": "web",
-      "image": "668191888953.dkr.ecr.ap-south-1.amazonaws.com/github:latest",
-      "essential": true,
-      "portMappings": [{ "containerPort": 80, "protocol": "tcp" }],
-      "logConfiguration": {
-        "logDriver": "awslogs",
-        "options": {
-          "awslogs-region": "ap-south-1",
-          "awslogs-group": "/ecs/github-app",
-          "awslogs-stream-prefix": "web"
-        }
-      }
-    }
-  ]
-}
+name: github-actions
+
+on:
+  push:
+    branches: [ develop-cleanup ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  ECR_REPO: ${{ vars.ECR_REPO }}
+  ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+  ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+  CONTAINER_NAME: ${{ vars.CONTAINER_NAME }}
+
+jobs:
+  build:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: meta
+        run: echo "image_tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        run: |
+          REPO_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+          docker build -t "${REPO_URI}:${{ steps.meta.outputs.image_tag }}" -t "${REPO_URI}:latest" .
+          mkdir -p dist
+          docker save "${REPO_URI}:${{ steps.meta.outputs.image_tag }}" "${REPO_URI}:latest" -o dist/image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: dist/image.tar
+          if-no-files-found: error
+
+  push:
+    name: Push image to ECR
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      image_uri: ${{ steps.pushnresolve.outputs.image_uri }}
+      repo_uri: ${{ steps.pushnresolve.outputs.repo_uri }}
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: .
+
+      - name: Load image
+        run: docker load -i image.tar
+
+      - name: Configure AWS (access keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push tags & resolve digest
+        id: pushnresolve
+        run: |
+          set -e
+          REPO_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+          IMAGE_TAG="${{ needs.build.outputs.image_tag }}"
+
+          docker push "${REPO_URI}:${IMAGE_TAG}"
+          docker push "${REPO_URI}:latest"
+
+          DIGEST=""
+          for i in {1..5}; do
+            DIGEST=$(aws ecr describe-images \
+              --repository-name "${ECR_REPO}" \
+              --image-ids imageTag="${IMAGE_TAG}" \
+              --query 'imageDetails[0].imageDigest' --output text) && break
+            sleep 5
+          done
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "None" ]; then
+            echo "Failed to resolve image digest. Check ECR repo/region/tag."
+            exit 1
+          fi
+
+          echo "repo_uri=${REPO_URI}" >> "$GITHUB_OUTPUT"
+          echo "image_uri=${REPO_URI}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Register taskdef & Update ECS service
+    needs: push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq (safety)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Configure AWS (access keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Patch taskdef.json with new image digest
+        run: |
+          echo "New image: ${{ needs.push.outputs.image_uri }}"
+          jq --arg IMG "${{ needs.push.outputs.image_uri }}" \
+             --arg NAME "${CONTAINER_NAME}" \
+             '(.containerDefinitions[] | select(.name==$NAME) | .image)=$IMG' \
+             taskdef.json > taskdef.rendered.json
+          cat taskdef.rendered.json
+
+      - name: Register task definition
+        id: reg
+        run: |
+          NEW_TD_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://taskdef.rendered.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          if [ -z "$NEW_TD_ARN" ] || [ "$NEW_TD_ARN" = "None" ]; then
+            echo "Failed to register task definition."
+            exit 1
+          fi
+          echo "NEW_TD_ARN=$NEW_TD_ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Update ECS service (force new deployment)
+        run: |
+          aws ecs update-service \
+            --cluster "${ECS_CLUSTER}" \
+            --service "${ECS_SERVICE}" \
+            --task-definition "${{ steps.reg.outputs.NEW_TD_ARN }}" \
+            --force-new-deployment
+
+      - name: Quick status
+        run: |
+          aws ecs describe-services \
+            --cluster "${ECS_CLUSTER}" \
+            --services "${ECS_SERVICE}" \
+            --region "${AWS_REGION}" \
+            --query 'services[0].{Running:runningCount,Desired:desiredCount,TaskDef:taskDefinition,Events:events[0:3].message}' \
+            --output table
