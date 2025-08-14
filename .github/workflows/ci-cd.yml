@@ -11,7 +11,7 @@ permissions:
 env:
   AWS_REGION: ap-south-1
   AWS_ACCOUNT_ID: 668191888953
-  ECR_REPO: my-repo
+  ECR_REPO: my-app
   ECS_CLUSTER: my-cluster
   ECS_SERVICE: my-service
   CONTAINER_NAME: web
