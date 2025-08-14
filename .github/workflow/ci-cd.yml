@@ -1,0 +1,72 @@
+name: CI/CD → ECR + ECS (amd64)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}           
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}  
+      ECR_REPO: ${{ vars.ECR_REPO }}               
+      ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}         
+      ECS_SERVICE: ${{ vars.ECS_SERVICE }}        
+      CONTAINER_NAME: ${{ vars.CONTAINER_NAME }}   
+      OIDC_ROLE_ARN: ${{ vars.OIDC_ROLE_ARN }}     
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & push image (amd64)
+        run: |
+          REPO_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+          docker build -t "${REPO_URI}:${GITHUB_SHA}" -t "${REPO_URI}:latest" -f httpd.Dockerfile .
+          docker push "${REPO_URI}:${GITHUB_SHA}"
+          docker push "${REPO_URI}:latest"
+          echo "REPO_URI=${REPO_URI}" >> $GITHUB_ENV
+
+      - name: Resolve image digest
+        run: |
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "${ECR_REPO}" \
+            --image-ids imageTag="${GITHUB_SHA}" \
+            --query 'imageDetails[0].imageDigest' --output text)
+          echo "IMAGE_URI=${REPO_URI}@${DIGEST}" >> $GITHUB_ENV
+
+      - name: Patch taskdef with image digest
+        run: |
+          jq --arg IMG "${IMAGE_URI}" --arg NAME "${CONTAINER_NAME}" \
+             '(.containerDefinitions[] | select(.name==$NAME) | .image)=$IMG' \
+             taskdef.json > taskdef.rendered.json
+          cat taskdef.rendered.json
+
+      - name: Register task definition
+        run: |
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://taskdef.rendered.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "TASK_DEF_ARN=${TASK_DEF_ARN}" >> $GITHUB_ENV
+
+      - name: Deploy (rolling)
+        run: |
+          aws ecs update-service \
+            --cluster "${ECS_CLUSTER}" \
+            --service "${ECS_SERVICE}" \
+            --task-definition "${TASK_DEF_ARN}" \
+            --force-new-deployment

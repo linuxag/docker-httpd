@@ -1,0 +1,26 @@
+{
+  "family": "github-app",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "runtimePlatform": { "cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX" },
+  "executionRoleArn": "arn:aws:iam::668191888953:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::668191888953:role/ecsTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "web",
+      "image": "668191888953.dkr.ecr.ap-south-1.amazonaws.com/github:latest",
+      "essential": true,
+      "portMappings": [{ "containerPort": 80, "protocol": "tcp" }],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-region": "ap-south-1",
+          "awslogs-group": "/ecs/github-app",
+          "awslogs-stream-prefix": "web"
+        }
+      }
+    }
+  ]
+}
